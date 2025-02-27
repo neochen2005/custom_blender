@@ -10,7 +10,6 @@
 
 #include "BLI_linklist.h"
 #include "BLI_listbase.h"
-#include "BLI_set.hh"
 #include "BLI_threads.h"
 
 #include "DNA_lineart_types.h"
@@ -22,7 +21,6 @@
 extern "C" {
 #endif
 
-struct LineartBoundingArea;
 struct LineartEdge;
 struct LineartData;
 struct LineartStaticMemPool;

@@ -16,6 +16,8 @@
 #include <algorithm> /* For `min/max`. */
 #include <cmath>
 
+#include "BKE_idprop.hh"
+
 #define LRT_OTHER_VERT(e, vt) ((vt) == (e)->v1 ? (e)->v2 : ((vt) == (e)->v2 ? (e)->v1 : nullptr))
 
 struct Object;
@@ -130,7 +132,8 @@ static LineartEdgeChainItem *lineart_chain_append_point(LineartData *ld,
   copy_v3_v3(eci->gpos, gpos);
   eci->index = index;
   copy_v3_v3(eci->normal, normal);
-  eci->line_type = type & MOD_LINEART_EDGE_FLAG_ALL_TYPE;
+  eci->line_type = type;/*
+  eci->facemark_filtered = ((type & MOD_LINEART_EDGE_FLAG_FACE_MARK_FILTERED)!=0);*/
   eci->occlusion = level;
   eci->material_mask_bits = material_mask_bits;
   eci->shadow_mask_bits = shadow_mask_bits;
@@ -165,7 +168,7 @@ static LineartEdgeChainItem *lineart_chain_prepend_point(LineartData *ld,
   copy_v3_v3(eci->gpos, gpos);
   eci->index = index;
   copy_v3_v3(eci->normal, normal);
-  eci->line_type = type & MOD_LINEART_EDGE_FLAG_ALL_TYPE;
+  eci->line_type = type;
   eci->occlusion = level;
   eci->material_mask_bits = material_mask_bits;
   eci->shadow_mask_bits = shadow_mask_bits;
@@ -1410,5 +1413,34 @@ void MOD_lineart_chain_find_silhouette_backdrop_objects(LineartData *ld)
       }
       ec->silhouette_backdrop = static_cast<Object *>(eln->object_ref);
     }
+
+    write_silhouette_ID(ec,"silhouette_ID");
+    if (ec->silhouette_ID == ec->silhouette_ID_backdrop && (ec->silhouette_ID!=0 && ec->silhouette_ID_backdrop!=0))
+    {
+
+      LISTBASE_FOREACH (LineartEdgeChainItem *, eci, &ec->chain) {
+        eci->is_silhouette=true;
+      }
+
+    }
+  }
+}
+
+
+void write_silhouette_ID(LineartEdgeChain *ec,const blender::StringRef name)
+{
+  Object *ob = ec->object_ref;
+  Object *bd = ec->silhouette_backdrop;
+  if (ob != nullptr && bd != nullptr){
+  
+    IDProperty *obip = ob->id.properties;
+    IDProperty *bdip = bd->id.properties;
+
+    IDProperty *ob_prop = IDP_GetPropertyFromGroup(obip, name);
+    IDProperty *bd_prop = IDP_GetPropertyFromGroup(bdip, name);
+
+    ec->silhouette_ID = (ob_prop==nullptr)? 0:IDP_Int(ob_prop);
+    ec->silhouette_ID_backdrop = (bd_prop==nullptr)? 0:IDP_Int(bd_prop);
+
   }
 }

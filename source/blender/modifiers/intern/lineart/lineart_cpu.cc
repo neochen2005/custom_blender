@@ -11,11 +11,14 @@
 #include "MOD_lineart.hh"
 
 #include "BLI_listbase.h"
+#include "BLI_math_base.hh"
 #include "BLI_math_geom.h"
 #include "BLI_math_matrix.h"
 #include "BLI_math_matrix.hh"
 #include "BLI_math_rotation.h"
+#include "BLI_math_vector.hh"
 #include "BLI_sort.hh"
+#include "BLI_string.h"
 #include "BLI_task.h"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
@@ -29,8 +32,10 @@
 #include "BKE_deform.hh"
 #include "BKE_geometry_set.hh"
 #include "BKE_global.hh"
+#include "BKE_gpencil_geom_legacy.h"
 #include "BKE_gpencil_legacy.h"
 #include "BKE_grease_pencil.hh"
+#include "BKE_grease_pencil_legacy_convert.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_material.hh"
 #include "BKE_mesh.hh"
@@ -41,6 +46,7 @@
 
 #include "DNA_camera_types.h"
 #include "DNA_collection_types.h"
+#include "DNA_gpencil_legacy_types.h"
 #include "DNA_light_types.h"
 #include "DNA_material_types.h"
 #include "DNA_meshdata_types.h"
@@ -57,6 +63,8 @@
 #include "GEO_join_geometries.hh"
 
 #include "lineart_intern.hh"
+
+#include <algorithm> /* For `min/max`. */
 
 using blender::float3;
 using blender::int3;
@@ -1493,6 +1501,8 @@ struct EdgeFeatData {
   LineartTriangle *tri_array;
   blender::VArray<bool> sharp_edges;
   blender::VArray<bool> sharp_faces;
+  blender::VArray<bool> lineart_edgemark;
+
   LineartVert *v_array;
   float crease_threshold;
   bool use_auto_smooth;
@@ -1537,51 +1547,58 @@ static void lineart_identify_corner_tri_feature_edges(void *__restrict userdata,
     return;
   }
 
+  AttributeAccessor attributes = mesh->attributes();
+  blender::VArray<bool> lineart_facemark = *attributes.lookup_or_default<bool>(
+      "lineart_facemark", AttrDomain::Face, false);
+
   bool face_mark_filtered = false;
-  bool enable_face_mark = (e_feat_data->use_freestyle_face &&
-                           e_feat_data->ld->conf.filter_face_mark);
+  /*bool enable_face_mark = (e_feat_data->use_freestyle_face &&
+                           e_feat_data->ld->conf.filter_face_mark);*/
   bool only_contour = false;
-  if (enable_face_mark) {
-    FreestyleFace *ff1, *ff2;
-    int index = e_feat_data->freestyle_face_index;
-    if (index > -1) {
-      ff1 = &((FreestyleFace *)mesh->face_data.layers[index].data)[tri_faces[i / 3]];
-    }
-    if (edge_nabr[i].e > -1) {
-      ff2 = &((FreestyleFace *)mesh->face_data.layers[index].data)[tri_faces[edge_nabr[i].e / 3]];
-    }
-    else {
-      /* Handle mesh boundary cases: We want mesh boundaries to respect
-       * `filter_face_mark_boundaries` option the same way as face mark boundaries, and the code
-       * path is simper when it's assuming both ff1 and ff2 not nullptr. */
-      ff2 = ff1;
-    }
-    if (e_feat_data->ld->conf.filter_face_mark_boundaries ^
-        e_feat_data->ld->conf.filter_face_mark_invert)
-    {
-      if ((ff1->flag & FREESTYLE_FACE_MARK) || (ff2->flag & FREESTYLE_FACE_MARK)) {
-        face_mark_filtered = true;
-      }
-    }
-    else {
-      if ((ff1->flag & FREESTYLE_FACE_MARK) && (ff2->flag & FREESTYLE_FACE_MARK) && (ff2 != ff1)) {
-        face_mark_filtered = true;
-      }
-    }
-    if (e_feat_data->ld->conf.filter_face_mark_invert) {
-      face_mark_filtered = !face_mark_filtered;
-    }
-    if (!face_mark_filtered) {
-      edge_nabr[i].flags = MOD_LINEART_EDGE_FLAG_INHIBIT;
-      if (e_feat_data->ld->conf.filter_face_mark_keep_contour) {
-        only_contour = true;
-      }
-    }
+
+  bool ff1, ff2;
+  ff1 = lineart_facemark[tri_faces[i / 3]];
+
+  if (edge_nabr[i].e > -1) {
+    ff2 = lineart_facemark[tri_faces[edge_nabr[i].e / 3]];
+  }
+  else {
+    /* Handle mesh boundary cases: We want mesh boundaries to respect
+     * `filter_face_mark_boundaries` option the same way as face mark boundaries, and the code
+     * path is simper when it's assuming both ff1 and ff2 not nullptr. */
+    ff2 = ff1;
   }
 
-  if (enable_face_mark && !face_mark_filtered && !only_contour) {
+  if (ff1 || ff2) {
+    face_mark_filtered = true;
+  }
+
+  if (e_feat_data->ld->conf.filter_face_mark_boundaries ^
+      e_feat_data->ld->conf.filter_face_mark_invert)
+  {
+    if (ff1 || ff2) {
+      face_mark_filtered = true;
+    }
+  }
+  else {
+    if (ff1 && ff2 && (ff2 != ff1)) {
+      face_mark_filtered = true;
+    }
+  }
+  if (e_feat_data->ld->conf.filter_face_mark_invert) {
+    face_mark_filtered = !face_mark_filtered;
+  }
+
+
+  const int3 real_edges = corner_tri_get_real_edges(e_feat_data->edges,
+                                                    e_feat_data->corner_verts,
+                                                    e_feat_data->corner_edges,
+                                                    corner_tris[i / 3]);
+
+  if (face_mark_filtered && !only_contour) {
     return;
   }
+
 
   /* Mesh boundary */
   if (edge_nabr[i].e == -1) {
@@ -1690,16 +1707,6 @@ static void lineart_identify_corner_tri_feature_edges(void *__restrict userdata,
       }
     }
   }
-  else {                     /* only_contour */
-    if (!edge_flag_result) { /* Other edge types inhibited */
-      return;
-    }
-  }
-
-  const int3 real_edges = corner_tri_get_real_edges(e_feat_data->edges,
-                                                    e_feat_data->corner_verts,
-                                                    e_feat_data->corner_edges,
-                                                    corner_tris[i / 3]);
 
   if (real_edges[i % 3] >= 0) {
     if (ld->conf.use_crease && ld->conf.sharp_as_crease &&
@@ -1708,15 +1715,14 @@ static void lineart_identify_corner_tri_feature_edges(void *__restrict userdata,
       edge_flag_result |= MOD_LINEART_EDGE_FLAG_CREASE;
     }
 
-    if (ld->conf.use_edge_marks && e_feat_data->use_freestyle_edge) {
-      FreestyleEdge *fe;
-      int index = e_feat_data->freestyle_edge_index;
-      fe = &((FreestyleEdge *)mesh->edge_data.layers[index].data)[real_edges[i % 3]];
-      if (fe->flag & FREESTYLE_EDGE_MARK) {
-        edge_flag_result |= MOD_LINEART_EDGE_FLAG_EDGE_MARK;
-      }
+    if (ld->conf.use_edge_marks && e_feat_data->lineart_edgemark[real_edges[i % 3]]) {
+      edge_flag_result |= MOD_LINEART_EDGE_FLAG_EDGE_MARK;
     }
   }
+  
+  /*if (!face_mark_filtered && !only_contour) {
+    edge_flag_result |= MOD_LINEART_EDGE_FLAG_FACE_MARK_FILTERED;
+  }*/
 
   edge_nabr[i].flags = edge_flag_result;
 
@@ -1729,7 +1735,7 @@ static void lineart_identify_corner_tri_feature_edges(void *__restrict userdata,
                                    1;
   }
 }
-
+//---------------------------------------------------------------------------------------------------------------------------------------------
 struct LooseEdgeData {
   int loose_count;
   int *loose_array;
@@ -1852,6 +1858,7 @@ static void lineart_load_tri_task(void *__restrict userdata,
                                          LRT_MATERIAL_CUSTOM_INTERSECTION_PRIORITY)) ?
                                     mat->lineart.intersection_priority :
                                     ob_info->intersection_priority);
+
   tri->flags |= (mat && (mat->blend_flag & MA_BL_CULL_BACKFACE)) ?
                     LRT_TRIANGLE_MAT_BACK_FACE_CULLING :
                     0;
@@ -1981,19 +1988,7 @@ static void lineart_geometry_object_load(LineartObjectInfo *ob_info,
   const AttributeAccessor attributes = mesh->attributes();
   const VArraySpan material_indices = *attributes.lookup<int>("material_index", AttrDomain::Face);
 
-  /* Check if we should look for custom data tags like Freestyle edges or faces. */
-  bool can_find_freestyle_edge = false;
-  int layer_index = CustomData_get_active_layer_index(&mesh->edge_data, CD_FREESTYLE_EDGE);
-  if (layer_index != -1) {
-    can_find_freestyle_edge = true;
-  }
-
-  bool can_find_freestyle_face = false;
-  layer_index = CustomData_get_active_layer_index(&mesh->face_data, CD_FREESTYLE_FACE);
-  if (layer_index != -1) {
-    can_find_freestyle_face = true;
-  }
-
+ 
   /* If we allow duplicated edges, one edge should get added multiple times if is has been
    * classified as more than one edge type. This is so we can create multiple different line type
    * chains containing the same edge. */
@@ -2113,6 +2108,12 @@ static void lineart_geometry_object_load(LineartObjectInfo *ob_info,
   const VArray<bool> sharp_faces = *attributes.lookup_or_default<bool>(
       "sharp_face", AttrDomain::Face, false);
 
+  const VArray<bool> lineart_edgemark = *attributes.lookup_or_default<bool>(
+      "lineart_edgemark", AttrDomain::Edge, false);
+  const VArray<bool> lineart_facemark = *attributes.lookup_or_default<bool>(
+      "lineart_facemark", AttrDomain::Face, false);
+
+
   EdgeFeatData edge_feat_data = {nullptr};
   edge_feat_data.ld = la_data;
   edge_feat_data.mesh = mesh;
@@ -2125,22 +2126,15 @@ static void lineart_geometry_object_load(LineartObjectInfo *ob_info,
   edge_feat_data.tri_faces = mesh->corner_tri_faces();
   edge_feat_data.sharp_edges = sharp_edges;
   edge_feat_data.sharp_faces = sharp_faces;
+  
+  edge_feat_data.lineart_edgemark = lineart_edgemark;
+
   edge_feat_data.edge_nabr = lineart_build_edge_neighbor(mesh, total_edges);
   edge_feat_data.tri_array = la_tri_arr;
   edge_feat_data.v_array = la_v_arr;
   edge_feat_data.crease_threshold = crease_angle;
   edge_feat_data.use_auto_smooth = use_auto_smooth;
-  edge_feat_data.use_freestyle_face = can_find_freestyle_face;
-  edge_feat_data.use_freestyle_edge = can_find_freestyle_edge;
-  if (edge_feat_data.use_freestyle_face) {
-    edge_feat_data.freestyle_face_index = CustomData_get_layer_index(&mesh->face_data,
-                                                                     CD_FREESTYLE_FACE);
-  }
-  if (edge_feat_data.use_freestyle_edge) {
-    edge_feat_data.freestyle_edge_index = CustomData_get_layer_index(&mesh->edge_data,
-                                                                     CD_FREESTYLE_EDGE);
-  }
-
+ 
   BLI_task_parallel_range(0,
                           total_edges,
                           &edge_feat_data,
@@ -2532,7 +2526,7 @@ static void lineart_object_load_single_instance(LineartData *ld,
   copy_m4d_m4(obi->normal, imat);
 
   obi->original_me = use_mesh;
-  obi->original_ob = (ref_ob->id.orig_id ? (Object *)ref_ob->id.orig_id : ref_ob);
+  obi->original_ob = (ref_ob->id.orig_id ? (Object *)ref_ob->id.orig_id : (Object *)ref_ob);
   obi->original_ob_eval = DEG_get_evaluated_object(depsgraph, obi->original_ob);
   lineart_geometry_load_assign_thread(olti, obi, thread_count, use_mesh->faces_num);
 }
@@ -2646,6 +2640,7 @@ void lineart_main_load_geometries(Depsgraph *depsgraph,
   if (G.debug_value == 4000) {
     printf("thread count: %d\n", thread_count);
   }
+  
   for (int i = 0; i < thread_count; i++) {
     olti[i].ld = ld;
     olti[i].shadow_elns = shadow_elns;
@@ -4450,8 +4445,12 @@ static bool lineart_get_triangle_bounding_areas(
   if ((*rowend) >= ld->qtree.count_y) {
     (*rowend) = ld->qtree.count_y - 1;
   }
-  *colbegin = std::max(*colbegin, 0);
-  *rowbegin = std::max(*rowbegin, 0);
+  if ((*colbegin) < 0) {
+    (*colbegin) = 0;
+  }
+  if ((*rowbegin) < 0) {
+    (*rowbegin) = 0;
+  }
 
   return true;
 }
@@ -4519,8 +4518,12 @@ LineartBoundingArea *MOD_lineart_get_parent_bounding_area(LineartData *ld, doubl
   if (row >= ld->qtree.count_y) {
     row = ld->qtree.count_y - 1;
   }
-  col = std::max(col, 0);
-  row = std::max(row, 0);
+  if (col < 0) {
+    col = 0;
+  }
+  if (row < 0) {
+    row = 0;
+  }
 
   return &ld->qtree.initials[row * ld->qtree.count_x + col];
 }
@@ -4531,8 +4534,12 @@ static LineartBoundingArea *lineart_get_bounding_area(LineartData *ld, double x,
   double sp_w = ld->qtree.tile_width, sp_h = ld->qtree.tile_height;
   int c = int((x + 1.0) / sp_w);
   int r = ld->qtree.count_y - int((y + 1.0) / sp_h) - 1;
-  r = std::max(r, 0);
-  c = std::max(c, 0);
+  if (r < 0) {
+    r = 0;
+  }
+  if (c < 0) {
+    c = 0;
+  }
   if (r >= ld->qtree.count_y) {
     r = ld->qtree.count_y - 1;
   }
@@ -4698,11 +4705,15 @@ static void lineart_create_edges_from_isec_data(LineartIsecData *d)
                                                         &ld->geom.line_buffer_pointers, obi2);
       Object *ob1 = eln1 ? static_cast<Object *>(eln1->object_ref) : nullptr;
       Object *ob2 = eln2 ? static_cast<Object *>(eln2->object_ref) : nullptr;
+
       if (e->t1->intersection_priority > e->t2->intersection_priority) {
         e->object_ref = ob1;
       }
       else if (e->t1->intersection_priority < e->t2->intersection_priority) {
         e->object_ref = ob2;
+      }
+      else if (e->t1->intersection_priority == e->t2->intersection_priority) {
+        e->object_ref = ob1;
       }
       else { /* equal priority */
         if (ob1 == ob2) {
@@ -5074,7 +5085,7 @@ bool MOD_lineart_compute_feature_lines_v3(Depsgraph *depsgraph,
   lineart_main_get_view_vector(ld);
 
   LineartModifierRuntime *runtime = reinterpret_cast<LineartModifierRuntime *>(lmd.runtime);
-  blender::Set<const Object *> *included_objects = runtime ? &runtime->object_dependencies :
+  blender::Set<const Object *> *included_objects = runtime ? &runtime->object_dependencies:
                                                              nullptr;
 
   lineart_main_load_geometries(depsgraph,
@@ -5206,10 +5217,10 @@ bool MOD_lineart_compute_feature_lines_v3(Depsgraph *depsgraph,
   return true;
 }
 
-struct LineartChainWriteInfo {
+typedef struct LineartChainWriteInfo {
   LineartEdgeChain *chain;
   int point_count;
-};
+} LineartChainWriteInfo;
 
 void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
                                      const blender::float4x4 &inverse_mat,
@@ -5275,8 +5286,9 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
   writer.reserve(128);
   int total_point_count = 0;
   int stroke_count = 0;
-  LISTBASE_FOREACH (LineartEdgeChain *, ec, &cache->chains) {
 
+  LISTBASE_FOREACH (LineartEdgeChain *, ec, &cache->chains) {
+    
     if (ec->picked) {
       continue;
     }
@@ -5290,7 +5302,7 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
       continue;
     }
     if (orig_col && ec->object_ref) {
-      if (BKE_collection_has_object_recursive_instanced(orig_col, ec->object_ref)) {
+      if (BKE_collection_has_object_recursive_instanced(orig_col, (Object *)ec->object_ref)) {
         if (modifier_flags & MOD_LINEART_INVERT_COLLECTION) {
           continue;
         }
@@ -5348,36 +5360,6 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
         }
       }
     }
-    if (silhouette_mode && (ec->type & (MOD_LINEART_EDGE_FLAG_CONTOUR))) {
-      bool is_silhouette = false;
-      if (orig_col) {
-        if (!ec->silhouette_backdrop) {
-          is_silhouette = true;
-        }
-        else if (!BKE_collection_has_object_recursive_instanced(orig_col, ec->silhouette_backdrop))
-        {
-          is_silhouette = true;
-        }
-      }
-      else {
-        if ((!orig_ob) && (!ec->silhouette_backdrop)) {
-          is_silhouette = true;
-        }
-      }
-
-      if ((silhouette_mode == LINEART_SILHOUETTE_FILTER_INDIVIDUAL || orig_ob) &&
-          ec->silhouette_backdrop != ec->object_ref)
-      {
-        is_silhouette = true;
-      }
-
-      if (inverse_silhouette) {
-        is_silhouette = !is_silhouette;
-      }
-      if (!is_silhouette) {
-        continue;
-      }
-    }
 
     /* Preserved: If we ever do asynchronous generation, this picked flag should be set here. */
     // ec->picked = 1;
@@ -5392,7 +5374,7 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
 
     stroke_count++;
   }
-
+  
   if (!total_point_count || !stroke_count) {
     return;
   }
@@ -5412,28 +5394,72 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
   SpanAttributeWriter<int> stroke_materials = attributes.lookup_or_add_for_write_span<int>(
       "material_index", AttrDomain::Curve);
 
-  MutableSpan<int> offsets = new_curves.offsets_for_write();
+  SpanAttributeWriter<bool> point_silhouette = attributes.lookup_or_add_for_write_only_span<bool>(
+      "lineart_silhouette", AttrDomain::Point);
 
+  SpanAttributeWriter<bool> point_filtered = attributes.lookup_or_add_for_write_only_span<bool>(
+      "lineart_filtered", AttrDomain::Point);
+
+  SpanAttributeWriter<int> point_type = attributes.lookup_or_add_for_write_only_span<int>(
+      "lineart_type", AttrDomain::Point);
+
+  SpanAttributeWriter<int> point_index = attributes.lookup_or_add_for_write_only_span<int>(
+      "lineart_index", AttrDomain::Point);
+
+  SpanAttributeWriter<float3> point_normal = attributes.lookup_or_add_for_write_only_span<float3>(
+      "lineart_normal", AttrDomain::Point);
+
+  SpanAttributeWriter<float> point_thickness = attributes.lookup_or_add_for_write_only_span<float>(
+      "lineart_thickness", AttrDomain::Point);
+
+  SpanAttributeWriter<float3> point_color = attributes.lookup_or_add_for_write_only_span<float3>(
+      "lineart_color", AttrDomain::Point);
+
+  MutableSpan<int> offsets = new_curves.offsets_for_write();
+  //------------------//------------------//------------------
   SpanAttributeWriter<float> vgroup_weights;
   if (vgname) {
     vgroup_weights = attributes.lookup_or_add_for_write_span<float>(vgname, AttrDomain::Point);
   }
-
+  
   int up_to_point = 0;
   for (int chain_i : writer.index_range()) {
     LineartChainWriteInfo &cwi = writer[chain_i];
 
+    //------------------//------------------//------------------
     MDeformVert *src_dvert = nullptr;
     int src_deform_group = -1;
     Mesh *src_mesh = nullptr;
-    if (source_vgname && vgroup_weights) {
-      Object *eval_ob = DEG_get_evaluated_object(depsgraph, cwi.chain->object_ref);
-      if (eval_ob && eval_ob->type == OB_MESH) {
-        src_mesh = BKE_object_get_evaluated_mesh(eval_ob);
-        src_dvert = src_mesh->deform_verts_for_write().data();
-        src_deform_group = BKE_id_defgroup_name_index(&src_mesh->id, source_vgname);
+
+    Object *eval_ob = DEG_get_evaluated_object(depsgraph, cwi.chain->object_ref);
+    src_mesh = BKE_object_get_evaluated_mesh(eval_ob);
+
+
+    if (eval_ob && eval_ob->type == OB_MESH) {
+      src_dvert = src_mesh->deform_verts_for_write().data();
+      src_mesh = BKE_object_get_evaluated_mesh(eval_ob);
+      src_deform_group = BKE_id_defgroup_name_index(&src_mesh->id, source_vgname);
       }
-    }
+
+    //------------------//---SamlpeGNattribute----//------------------
+
+    /*void attribute_transfer (LineartEdgeChainItem *eci,const blender::StringRef name,int point_i)
+    {
+      SpanAttributeWriter<int> point_attributes = attributes.lookup_or_add_for_write_only_span<int>(name, AttrDomain::Point);
+      point_attributes.span[point_i]=
+      point_attributes.finish();
+    }*/
+    //------------------//------------------//------------------
+
+    const AttributeAccessor attributes = src_mesh->attributes();
+    const blender::VArray<float3> color = *attributes.lookup_or_default<float3>("lineart_color", AttrDomain::Point, {0, 0, 0});
+    const blender::VArray<float> thickness = *attributes.lookup_or_default<float>("lineart_thickness", AttrDomain::Point, 0);
+
+    /*  if (src_mesh != nullptr)
+      {
+        const blender::VArray<float3> color = *attributes.lookup_or_default<float3>("lineart_color", AttrDomain::Point, {0, 0, 0});
+      }*/
+
 
     int i;
     LISTBASE_FOREACH_INDEX (LineartEdgeChainItem *, eci, &cwi.chain->chain, i) {
@@ -5442,9 +5468,32 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
       point_radii.span[point_i] = thickness / 2.0f;
       point_opacities.span[point_i] = opacity;
 
+      point_silhouette.span[point_i] = eci->is_silhouette;
+      point_filtered.span[point_i] = eci->facemark_filtered;
+
+      point_type.span[point_i] = eci->line_type;
+      point_index.span[point_i] = eci->index;
+
+      point_normal.span[point_i] = eci->normal;
+
+      int vindex = eci->index;
+
+      //------------------//------------------//------------------
+      point_color.span[point_i] = {0,0,0};
+      if ((vindex < src_mesh->verts_num)
+        &&(src_mesh!=nullptr))
+      {
+        point_color.span[point_i] = color[eci->index];
+      }
+
+      point_thickness.span[point_i] = 0;
+      if ((vindex < src_mesh->verts_num)
+        && (src_mesh != nullptr))
+      {
+        point_thickness.span[point_i] = thickness[eci->index];
+      }
+      //------------------//------------------//------------------
       if (src_deform_group >= 0) {
-        int vindex;
-        vindex = eci->index;
         if (vindex >= src_mesh->verts_num) {
           break;
         }
@@ -5452,6 +5501,9 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
 
         vgroup_weights.span[point_i] = invert_input ? (1 - mdw->weight) : mdw->weight;
       }
+      //------------------//------------------//------------------
+
+
     }
     offsets[chain_i] = up_to_point;
     stroke_materials.span[chain_i] = max_ii(mat_nr, 0);
@@ -5467,6 +5519,14 @@ void MOD_lineart_gpencil_generate_v3(const LineartCache *cache,
   point_radii.finish();
   point_opacities.finish();
   stroke_materials.finish();
+
+  point_silhouette.finish();
+  point_filtered.finish();
+  point_type.finish();
+  point_index.finish();
+  point_color.finish();
+  point_thickness.finish();
+  point_normal.finish();
 
   Curves *original_curves = blender::bke::curves_new_nomain(drawing.strokes());
   Curves *created_curves = blender::bke::curves_new_nomain(std::move(new_curves));

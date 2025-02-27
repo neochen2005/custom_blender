@@ -9,6 +9,7 @@
 #pragma once
 
 #include "BLI_linklist.h"
+#include "BLI_listbase.h"
 #include "BLI_math_matrix_types.hh"
 #include "BLI_math_vector.h"
 #include "BLI_set.hh"
@@ -17,7 +18,7 @@
 #include "ED_grease_pencil.hh"
 
 #include <algorithm>
-#include <cmath>
+#include <math.h>
 
 struct LineartBoundingArea;
 struct LineartEdge;
@@ -232,8 +233,14 @@ struct LineartEdgeChain {
    * local_index=lineart_index-index_offset. */
   uint32_t index_offset;
 
+  bool facemark_filtered;
+
   Object *object_ref;
   Object *silhouette_backdrop;
+
+  uint8_t silhouette_ID;
+  uint8_t silhouette_ID_backdrop;
+
 };
 
 struct LineartEdgeChainItem {
@@ -249,6 +256,10 @@ struct LineartEdgeChainItem {
   uint8_t intersection_mask;
   uint32_t shadow_mask_bits;
   size_t index;
+
+  size_t attr_sample_index[3];
+  bool facemark_filtered;
+  bool is_silhouette;
 };
 
 struct LineartChainRegisterEntry {
@@ -896,6 +907,7 @@ void MOD_lineart_chain_split_angle(LineartData *ld, float angle_threshold_rad);
 void MOD_lineart_smooth_chains(LineartData *ld, float tolerance);
 void MOD_lineart_chain_offset_towards_camera(LineartData *ld, float dist, bool use_custom_camera);
 void MOD_lineart_chain_find_silhouette_backdrop_objects(LineartData *ld);
+void write_silhouette_ID(LineartEdgeChain *ec,const blender::StringRef name);
 
 int MOD_lineart_chain_count(const LineartEdgeChain *ec);
 void MOD_lineart_chain_clear_picked_flag(LineartCache *lc);
