@@ -46,7 +46,7 @@ namespace greasepencil {
  * but in blender units (world space) directly. Also note that there is no longer a stroke
  * "thickness" attribute, the radii are directly stored on the points.
  * For compatibility, legacy thickness values have to be multiplied by this factor. */
-constexpr float LEGACY_RADIUS_CONVERSION_FACTOR = 1.0f / 2000.0f;
+constexpr float LEGACY_RADIUS_CONVERSION_FACTOR = 1.0f / 200000.0f;
 
 class DrawingRuntime {
  public:
