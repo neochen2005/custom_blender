@@ -164,14 +164,26 @@ static void GPENCIL_render_result_z(RenderLayer *rl,
   if ((view_layer->passflag & SCE_PASS_Z) == 0) {
     return;
   }
-  RenderPass *rp = RE_pass_find_by_name(rl, RE_PASSNAME_Z, viewname);
+  
+  RenderPass *rp;
+  GPUFrameBuffer *fb;
+
+  if (RE_pass_find_by_name(rl, "GP_Z", viewname) != nullptr) {
+    rp = RE_pass_find_by_name(rl, "GP_Z", viewname);
+    fb = vedata->instance->gpencil_fb;
+  }
+  else {
+    rp = RE_pass_find_by_name(rl, RE_PASSNAME_Z, viewname);
+    fb = vedata->instance->render_fb;
+  }
+
   if (rp == nullptr) {
     return;
   }
 
   float *ro_buffer_data = rp->ibuf->float_buffer.data;
 
-  GPU_framebuffer_read_depth(vedata->instance->render_fb,
+  GPU_framebuffer_read_depth(fb,
                              rect->xmin,
                              rect->ymin,
                              BLI_rcti_size_x(rect),
@@ -217,10 +229,25 @@ static void GPENCIL_render_result_combined(RenderLayer *rl,
                                            GPENCIL_Data *vedata,
                                            const rcti *rect)
 {
-  RenderPass *rp = RE_pass_find_by_name(rl, RE_PASSNAME_COMBINED, viewname);
+
+  RenderPass *rp;
+  GPUFrameBuffer *fb;
+
+  if (RE_pass_find_by_name(rl, "GP", viewname) != nullptr) {
+    rp = RE_pass_find_by_name(rl, "GP", viewname);
+    fb = vedata->instance->gpencil_fb;
+  }
+  else {
+    rp = RE_pass_find_by_name(rl, RE_PASSNAME_COMBINED, viewname);
+    fb = vedata->instance->render_fb;
+  }
+
+  if (rp == nullptr) {
+    return;
+  }
 
   GPU_framebuffer_bind(vedata->instance->render_fb);
-  GPU_framebuffer_read_color(vedata->instance->render_fb,
+  GPU_framebuffer_read_color(fb,
                              rect->xmin,
                              rect->ymin,
                              BLI_rcti_size_x(rect),
